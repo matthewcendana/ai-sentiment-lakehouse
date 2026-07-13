@@ -90,15 +90,15 @@ else:
             num_comments,
             url,
             created_at,
-            CAST(
+            TRY_CAST(
                 ai_query(
                     '{MODEL_ENDPOINT}',
                     CONCAT(
-                        'Rate the sentiment toward "', tool, '" expressed in this text, ',
+                        'Rate the sentiment toward "', tool, '" expressed in this text below, ',
                         'on a scale from -1 (very negative) to 1 (very positive), 0 being neutral. ',
-                        'Respond with ONLY the numeric score, nothing else.
+                        'The text is provided between <text> tags. Respond with ONLY the numeric score, nothing else, no explanation.
 
-Text: ', LEFT(text, {MAX_TEXT_CHARS})
+<text>', LEFT(text, {MAX_TEXT_CHARS}), '</text>'
                     )
                 ) AS DOUBLE
             ) AS sentiment_score
