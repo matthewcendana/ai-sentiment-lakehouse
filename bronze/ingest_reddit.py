@@ -1,15 +1,17 @@
 # Databricks notebook source
 # bronze/ingest_reddit.py
 #
-# Pulls submissions + comments mentioning tracked AI tools from Reddit
-# via PRAW and lands raw results into a Delta bronze table: bronze.reddit_raw
+# Pulls submissions mentioning tracked AI tools from Reddit via PRAW and lands
+# raw results into a Delta bronze table: bronze.reddit_raw
 #
-
-# COMMAND ----------
-
-%pip install -r ../requirements.txt
-
-# COMMAND ----------
+# INCREMENTAL: sorts search results newest-first and stops as soon as it
+# reaches a submission older than the latest one already in bronze, so
+# scheduled re-runs don't keep re-fetching the same old posts.
+#
+# Requires a Reddit API app (reddit.com/prefs/apps) and Databricks Secrets
+# scope "reddit" with keys: client_id, client_secret, user_agent.
+#
+# Run manually or as a scheduled Databricks Job.
 
 import sys
 import time
@@ -17,11 +19,13 @@ from datetime import datetime, timezone
 
 import praw
 from pyspark.sql import Row
+from pyspark.sql.utils import AnalysisException
 
 sys.path.append("../config")
 sys.path.append("../utils")
 
 from tools import AI_TOOLS  # noqa: E402
+from audit_log import log_run  # noqa: E402
 
 # COMMAND ----------
 
@@ -30,7 +34,6 @@ SCHEMA = "bronze"
 TABLE = "reddit_raw"
 FULL_TABLE_NAME = f"{CATALOG}.{SCHEMA}.{TABLE}"
 
-# Subreddits likely to discuss AI tools — tune this list as you go
 SUBREDDITS = [
     "artificial",
     "ChatGPT",
@@ -42,8 +45,8 @@ SUBREDDITS = [
     "webdev",
 ]
 
-POSTS_PER_QUERY = 100   # PRAW max per search call
-REQUEST_DELAY_SEC = 1   # be polite to the API / avoid rate limits
+POSTS_PER_QUERY = 100
+REQUEST_DELAY_SEC = 1
 
 # COMMAND ----------
 
@@ -60,12 +63,35 @@ reddit.read_only = True
 
 # COMMAND ----------
 
-def search_subreddit_for_tool(subreddit_name: str, tool_name: str):
-    """Search a subreddit for a tool name, return list of submissions."""
+def get_last_ingested_timestamp() -> float:
+    """
+    Returns the max reddit_created_utc already in bronze, as a unix timestamp.
+    Returns 0 (epoch) if the table doesn't exist yet or is empty — meaning
+    "pull everything" on the very first run.
+    """
+    try:
+        result = spark.sql(f"""
+            SELECT MAX(reddit_created_utc) AS max_ts FROM {FULL_TABLE_NAME}
+        """).collect()[0]["max_ts"]
+        if result is None:
+            return 0.0
+        return result.timestamp()
+    except AnalysisException:
+        return 0.0
+
+# COMMAND ----------
+
+def search_subreddit_for_tool(subreddit_name: str, tool_name: str, since_ts: float):
+    """
+    Search a subreddit for a tool name sorted newest-first, stopping as soon as
+    results drop below since_ts (everything after that point is already ingested).
+    """
     subreddit = reddit.subreddit(subreddit_name)
     results = []
     try:
         for submission in subreddit.search(tool_name, limit=POSTS_PER_QUERY, sort="new"):
+            if submission.created_utc <= since_ts:
+                break   # hit already-ingested territory — stop, since results are newest-first
             results.append(submission)
     except Exception as e:
         print(f"  !! Search failed for r/{subreddit_name} / {tool_name}: {e}")
@@ -91,32 +117,45 @@ def build_submission_row(submission, query_tool: str) -> Row:
 
 # COMMAND ----------
 
+since_ts = get_last_ingested_timestamp()
+if since_ts == 0:
+    print("No prior data found — this is a first run, pulling all available results.")
+else:
+    print(f"Incremental run — only pulling Reddit posts after {datetime.fromtimestamp(since_ts, tz=timezone.utc)}")
+
 all_rows = []
 
 for subreddit_name in SUBREDDITS:
     for tool_name in AI_TOOLS.keys():
         print(f"Searching r/{subreddit_name} for: {tool_name}")
-        submissions = search_subreddit_for_tool(subreddit_name, tool_name)
+        submissions = search_subreddit_for_tool(subreddit_name, tool_name, since_ts)
         rows = [build_submission_row(s, tool_name) for s in submissions]
         all_rows.extend(rows)
-        print(f"  -> {len(rows)} submissions")
+        print(f"  -> {len(rows)} new submissions")
         time.sleep(REQUEST_DELAY_SEC)
 
-print(f"Total rows collected: {len(all_rows)}")
+print(f"Total new rows collected: {len(all_rows)}")
 
 # COMMAND ----------
 
 if all_rows:
     df = spark.createDataFrame(all_rows)
 
-    (
-        df.write
-        .format("delta")
-        .mode("append")
-        .option("mergeSchema", "true")
-        .saveAsTable(FULL_TABLE_NAME)
-    )
-
-    print(f"Wrote {df.count()} rows to {FULL_TABLE_NAME}")
+    try:
+        (
+            df.write
+            .format("delta")
+            .mode("append")
+            .option("mergeSchema", "true")
+            .saveAsTable(FULL_TABLE_NAME)
+        )
+        row_count = df.count()
+        print(f"Wrote {row_count} new rows to {FULL_TABLE_NAME}")
+        log_run(spark, source="reddit", layer="bronze", rows_processed=row_count)
+    except Exception as e:
+        log_run(spark, source="reddit", layer="bronze", rows_processed=0,
+                 status="failed", error_message=str(e))
+        raise
 else:
-    print("No rows to write.")
+    print("No new rows to write.")
+    log_run(spark, source="reddit", layer="bronze", rows_processed=0)
