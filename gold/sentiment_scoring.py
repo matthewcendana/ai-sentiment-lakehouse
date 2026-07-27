@@ -111,8 +111,16 @@ try:
                     ai_query(
                         '{MODEL_ENDPOINT}',
                         CONCAT(
-                            'Rate the sentiment toward "', tool, '" expressed in this text below, ',
-                            'on a scale from -1 (very negative) to 1 (very positive), 0 being neutral. ',
+                            'You are scoring sentiment toward ONE SPECIFIC tool: "', tool, '". ',
+                            'The text below may mention several different tools — ignore sentiment toward ',
+                            'any other tool and score ONLY what is said about "', tool, '" specifically. ',
+                            'If the text lists/compares multiple tools, find the part that discusses "', tool, '" ',
+                            'and base your score on that part alone, even if the overall tone of the post ',
+                            'differs. Watch for sarcasm, backhanded compliments, or jokes that sound positive ',
+                            'but are actually critical of the tool. ',
+                            'Use the full scale from -1 (very negative) to 1 (very positive), 0 being neutral — ',
+                            'use precise decimal values (e.g. 0.3, -0.6, 0.85) rather than only -1, 0, or 1; ',
+                            'reserve exactly -1 or 1 for genuinely extreme, unambiguous statements. ',
                             'The text is provided between <text> tags. Respond with ONLY the numeric score, nothing else, no explanation.
 
 <text>', LEFT(text, {MAX_TEXT_CHARS}), '</text>'

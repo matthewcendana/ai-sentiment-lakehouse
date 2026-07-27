@@ -31,7 +31,7 @@ spark.addArtifact("../config/tools.py", pyfile=True)
 spark.addArtifact("../utils/schema.py", pyfile=True)
 spark.addArtifact("../utils/audit_log.py", pyfile=True)
 
-from tools import match_tools          # noqa: E402
+from tools import match_tools, LAUNCH_DATES  # noqa: E402
 from schema import SILVER_SCHEMA, validate_silver_df  # noqa: E402
 from audit_log import log_run  # noqa: E402
 
@@ -117,6 +117,14 @@ else:
             F.lit(datetime.now(timezone.utc)).alias("cleaned_at"),
         )
         .dropDuplicates(["post_id", "tool"])
+    )
+
+    launch_date_map = F.create_map([F.lit(x) for pair in LAUNCH_DATES.items() for x in pair])
+    silver_df = (
+        silver_df
+        .withColumn("_launch_date", launch_date_map.getItem(F.col("tool")))
+        .filter((F.col("_launch_date").isNull()) | (F.col("created_at") >= F.col("_launch_date")))
+        .drop("_launch_date")
     )
 
     validate_silver_df(silver_df)
