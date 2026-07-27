@@ -193,17 +193,30 @@ null_pct = round(100 * null_scores / total_rows, 2) if total_rows > 0 else 0
 if null_pct > 5:   # more than 5% nulls suggests a systemic prompt/model issue, not just noise
     dq_issues.append(f"{null_scores} rows ({null_pct}%) have NULL sentiment_score — above 5% threshold")
 
-# Check 3: no rows dated before any tool's known launch date (regression
-# check for the false-positive keyword matching issue found earlier)
+# Check 3: no rows dated before THEIR OWN matched tool's known launch date
+# (regression check for the false-positive keyword matching issue found
+# earlier). This must be a per-tool comparison, not a single global cutoff —
+# comparing against min(LAUNCH_DATES.values()) (the single earliest launch
+# across ALL tools) would only catch posts before that one earliest date and
+# silently miss violations for every other tool, whose own launch date is
+# later than that minimum.
 sys.path.append("../config")
 from tools import LAUNCH_DATES  # noqa: E402
 
-earliest_launch = min(LAUNCH_DATES.values())
+launch_dates_df = spark.createDataFrame(
+    [(tool, launch) for tool, launch in LAUNCH_DATES.items()],
+    schema="tool string, launch_date date",
+)
+launch_dates_df.createOrReplaceTempView("tool_launch_dates")
+
 pre_launch_rows = spark.sql(f"""
-    SELECT COUNT(*) AS n FROM {GOLD_TABLE} WHERE created_at < '{earliest_launch}'
+    SELECT COUNT(*) AS n
+    FROM {GOLD_TABLE} g
+    JOIN tool_launch_dates l ON g.tool = l.tool
+    WHERE g.created_at < CAST(l.launch_date AS TIMESTAMP)
 """).collect()[0]["n"]
 if pre_launch_rows > 0:
-    dq_issues.append(f"{pre_launch_rows} rows dated before {earliest_launch} (earliest tool launch) — possible false-positive matches")
+    dq_issues.append(f"{pre_launch_rows} rows dated before their tool's own launch date — possible false-positive matches")
 
 # COMMAND ----------
 

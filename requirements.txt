@@ -3,3 +3,4 @@ requests==2.32.3
 python-dotenv==1.0.1
 tenacity==8.5.0
 pandas==2.2.2
+pytest==7.4.0

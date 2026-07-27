@@ -1,21 +1,20 @@
 # tests/test_tools.py
 #
-# Unit tests for config/tools.py's match_tools() function.
-# Covers the specific false-positive patterns discovered during data
-# quality debugging (Claude Shannon, generic "lovable"/"windsurf", etc.)
-# so regressions get caught automatically instead of resurfacing silently
-# in production data.
+# Unit tests for config/tools.py's match_tools() -- regression coverage for
+# false-positive patterns found during data quality debugging (Claude
+# Shannon, bare "lovable"/"windsurf", etc).
 #
-# Run locally with: pytest tests/test_tools.py -v
-# (requires the config/ folder on the path — run from repo root, or add
-#  a conftest.py / adjust sys.path as needed for your test runner)
+# Run: pytest tests/test_tools.py -v
 
 import sys
 import os
+from datetime import date
+
+import pytest
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "config"))
 
-from tools import match_tools  # noqa: E402
+from tools import match_tools, AI_TOOLS, LAUNCH_DATES  # noqa: E402
 
 
 class TestStrongAliasMatching:
@@ -31,7 +30,6 @@ class TestStrongAliasMatching:
 
 class TestWeakAliasRequiresContext:
     def test_bare_lovable_without_context_does_not_match(self):
-        # "lovable" as a plain adjective, no AI context — should NOT match
         result = match_tools("What a lovable little dog you have!")
         assert "Lovable" not in result
 
@@ -48,9 +46,9 @@ class TestWeakAliasRequiresContext:
         assert "Windsurf" in result
 
     def test_bare_gemini_without_context_does_not_match(self):
+        # Regression test: "model" was removed from CONTEXT_KEYWORDS
+        # specifically because of this false positive.
         result = match_tools("Gemini 0.3.0 released: Model Driven REST framework.")
-        # "model" was removed from context keywords specifically because of
-        # this exact false positive — regression test for that fix.
         assert "Gemini" not in result
 
     def test_bare_perplexity_without_context_does_not_match(self):
@@ -64,10 +62,8 @@ class TestExclusionPhrases:
         assert "Claude" not in result
 
     def test_claude_shannon_excluded_even_with_ai_context_present(self):
-        # This is the key regression test: an article about Claude Shannon
-        # discussing information theory/computing will often ALSO contain
-        # AI-adjacent context words, which would defeat a naive context
-        # check. Exclusion phrases must take priority over context matching.
+        # Exclusion phrases must beat context matching -- Shannon articles
+        # are inherently tech-flavored, so context alone wouldn't filter them.
         result = match_tools(
             "Claude Shannon's work laid the foundation for machine learning "
             "and modern AI systems decades before they existed."
@@ -103,3 +99,37 @@ class TestEdgeCases:
 
     def test_case_insensitive_matching(self):
         assert "ChatGPT" in match_tools("CHATGPT is capitalized differently here.")
+
+
+class TestConfigConsistency:
+    # A tool missing from LAUNCH_DATES silently disables its date-cutoff
+    # guard in the silver-layer filter (NULL launch date = no restriction).
+
+    def test_every_ai_tool_has_a_launch_date(self):
+        missing = set(AI_TOOLS) - set(LAUNCH_DATES)
+        assert not missing, f"AI_TOOLS entries missing from LAUNCH_DATES: {missing}"
+
+    def test_no_orphaned_launch_dates(self):
+        orphaned = set(LAUNCH_DATES) - set(AI_TOOLS)
+        assert not orphaned, f"LAUNCH_DATES entries with no matching AI_TOOLS entry: {orphaned}"
+
+    def test_launch_dates_are_date_objects(self):
+        bad = {k: type(v) for k, v in LAUNCH_DATES.items() if not isinstance(v, date)}
+        assert not bad, f"LAUNCH_DATES values must be datetime.date instances: {bad}"
+
+
+class TestKnownLimitations:
+    # No exclusion-phrase backstop for generic "lovable" usage (unlike
+    # "claude"). In production this is caught by the LAUNCH_DATES cutoff,
+    # not by match_tools() itself -- documented gap, not a passing guarantee.
+    @pytest.mark.xfail(
+        reason="No exclusion-phrase backstop for generic 'lovable' usage; "
+               "only caught by the LAUNCH_DATES cutoff, not by match_tools() itself.",
+        strict=True,
+    )
+    def test_lovable_generic_usage_with_unrelated_ai_context_does_not_match(self):
+        result = match_tools(
+            "This keyboard brand is so lovable, and its companion app even "
+            "has an AI typing assistant."
+        )
+        assert "Lovable" not in result
