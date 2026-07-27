@@ -166,3 +166,52 @@ display(
         ORDER BY rows_scored DESC
     """)
 )
+
+# COMMAND ----------
+
+# Data quality checks — run after every scoring pass. Logs a warning to the
+# audit table (does not fail the job) if any check finds bad data, so issues
+# surface in monitoring rather than silently accumulating.
+
+dq_issues = []
+
+# Check 1: sentiment scores must be within the valid -1 to 1 range
+out_of_range = spark.sql(f"""
+    SELECT COUNT(*) AS n FROM {GOLD_TABLE}
+    WHERE sentiment_score IS NOT NULL
+      AND (sentiment_score < -1 OR sentiment_score > 1)
+""").collect()[0]["n"]
+if out_of_range > 0:
+    dq_issues.append(f"{out_of_range} rows have sentiment_score outside [-1, 1]")
+
+# Check 2: null sentiment scores (malformed model responses that TRY_CAST caught)
+null_scores = spark.sql(f"""
+    SELECT COUNT(*) AS n FROM {GOLD_TABLE} WHERE sentiment_score IS NULL
+""").collect()[0]["n"]
+total_rows = spark.sql(f"SELECT COUNT(*) AS n FROM {GOLD_TABLE}").collect()[0]["n"]
+null_pct = round(100 * null_scores / total_rows, 2) if total_rows > 0 else 0
+if null_pct > 5:   # more than 5% nulls suggests a systemic prompt/model issue, not just noise
+    dq_issues.append(f"{null_scores} rows ({null_pct}%) have NULL sentiment_score — above 5% threshold")
+
+# Check 3: no rows dated before any tool's known launch date (regression
+# check for the false-positive keyword matching issue found earlier)
+sys.path.append("../config")
+from tools import LAUNCH_DATES  # noqa: E402
+
+earliest_launch = min(LAUNCH_DATES.values())
+pre_launch_rows = spark.sql(f"""
+    SELECT COUNT(*) AS n FROM {GOLD_TABLE} WHERE created_at < '{earliest_launch}'
+""").collect()[0]["n"]
+if pre_launch_rows > 0:
+    dq_issues.append(f"{pre_launch_rows} rows dated before {earliest_launch} (earliest tool launch) — possible false-positive matches")
+
+# COMMAND ----------
+
+if dq_issues:
+    issue_summary = "; ".join(dq_issues)
+    print(f" Data quality issues found: {issue_summary}")
+    log_run(spark, source="all", layer="gold_dq_check", rows_processed=total_rows,
+             status="failed", error_message=issue_summary)
+else:
+    print(" All data quality checks passed.")
+    log_run(spark, source="all", layer="gold_dq_check", rows_processed=total_rows, status="success")
