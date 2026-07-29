@@ -1,4 +1,4 @@
-# tests/test_gold_sentiment_scored_delta.py
+# tests/test_sentiment_scored.py
 #
 # Data-quality checks that run natively on Databricks against the live Delta
 # table ai_tool_sentiment.gold.sentiment_scored (catalog.schema.table =
